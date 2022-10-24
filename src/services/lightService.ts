@@ -5,6 +5,16 @@ import { MultiServiceAccessory } from '../multiServiceAccessory';
 
 export class LightService extends BaseService {
 
+  // Because of a bug in SmartThings API, we cannot use setHue/setSaturation separately,
+  // we must instead use `setColor`, with both hue and saturation defined at the same time
+  // (because of another bug with setColor: hue specifically).
+  //
+  // Specific API error for setHue and setSaturation
+  // http status code: 424 (undocumented)
+  // "error":{"code":"connector failed","message":"java.lang.Integer cannot be cast to java.util.Map","details":[]}}
+  private deferredHue: CharacteristicValue | undefined;
+  private deferredSaturation: CharacteristicValue | undefined;
+
   constructor(platform: IKHomeBridgeHomebridgePlatform, accessory: PlatformAccessory, multiServiceAccessory: MultiServiceAccessory,
     name: string, deviceStatus) {
     super(platform, accessory, multiServiceAccessory, name, deviceStatus);
@@ -146,7 +156,7 @@ export class LightService extends BaseService {
         this.log.error(this.accessory.context.device.label + ' is offline');
         return reject(new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE));
       }
-      const stValue = 6500 - Math.round((value as number - 140) / 360 * 6500) + 1;
+      const stValue = Math.max(2200, Math.min(9000, Math.round(1000000 / (value as number))));
       this.log.debug(`Sending converted temperature value of ${stValue} to ${this.name}`);
       this.multiServiceAccessory.sendCommand('colorTemperature', 'setColorTemperature', [stValue])
         .then(() => resolve())
@@ -163,13 +173,13 @@ export class LightService extends BaseService {
           return reject(new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE));
         }
 
-        let stTemperature;
-
         if (this.deviceStatus.status.colorTemperature.colorTemperature.value !== undefined) {
-          stTemperature = Math.min(this.deviceStatus.status.colorTemperature.colorTemperature.value, 6500);
-          this.log.debug('getColorTemperature() SUCCESSFUL for ' + this.name + '. value = ' + stTemperature);
-          // Convert number to the homebridge compatible value
-          const hbTemperature = 500 - ((stTemperature / 6500) * 360);
+          const value = Math.max(2200, Math.min(this.deviceStatus.status.colorTemperature.colorTemperature.value, 9000));
+          // Convert number to the homebridge compatible value, using mired value
+          // https://developer.apple.com/documentation/homekit/hmcharacteristictypecolortemperature
+          const hbTemperature = 1000000 / value;
+          this.log.debug('getColorTemperature() SUCCESSFUL for ' + this.name + '. value = ' + value + ' converted to ' + hbTemperature);
+
           resolve(hbTemperature);
 
         } else {
@@ -185,11 +195,8 @@ export class LightService extends BaseService {
     this.log.debug(`setHue called with value ${value}`);
     const huePct = Math.round((value as number / 360) * 100);
     this.log.debug(`Hue arc value of ${value} converted to Hue Percent of ${huePct}`);
-    return new Promise((resolve, reject) => {
-      this.multiServiceAccessory.sendCommand('colorControl', 'setHue', [huePct])
-        .then(() => resolve())
-        .catch((value) => reject(value));
-    });
+    this.deferredHue = huePct;
+    return this.setColor();
   }
 
   async getHue(): Promise < CharacteristicValue > {
@@ -219,12 +226,8 @@ export class LightService extends BaseService {
 
   async setSaturation(value: CharacteristicValue): Promise<void> {
     this.log.debug(`setSaturation called with value ${value}`);
-    return new Promise((resolve, reject) => {
-      // Convert degress into percent
-      this.multiServiceAccessory.sendCommand('colorControl', 'setSaturation', [value])
-        .then(() => resolve())
-        .catch((value) => reject(value));
-    });
+    this.deferredSaturation = value;
+    return this.setColor();
   }
 
   async getSaturation(): Promise < CharacteristicValue > {
@@ -253,4 +256,26 @@ export class LightService extends BaseService {
     });
   }
 
+  async setColor(): Promise<void> {
+    if (this.deferredHue === undefined || this.deferredSaturation === undefined) {
+      return new Promise((resolve) => {
+        this.log.debug('setColor invoked, with either hue or saturation undefined.');
+
+        resolve();
+      });
+    }
+
+    this.log.debug(`setColor invoked with saturation: ${this.deferredSaturation}, hue: ${this.deferredHue}`);
+
+    return new Promise((resolve, reject) => {
+      this.multiServiceAccessory.sendCommand('colorControl', 'setColor', [{saturation: this.deferredSaturation, hue: this.deferredHue}])
+        .then(() => resolve())
+        .catch((value) => reject(value))
+        .finally(() => {
+          this.log.debug('Finally was called after setColor');
+          this.deferredHue = undefined;
+          this.deferredSaturation = undefined;
+        });
+    });
+  }
 }
