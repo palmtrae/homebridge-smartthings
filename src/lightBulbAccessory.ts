@@ -180,7 +180,7 @@ export class LightbulbPlatformAccessory extends BasePlatformAccessory {
     let level = 0;
     return new Promise<CharacteristicValue>((resolve, reject) => {
       if (!this.online) {
-        this.log.error(this.accessory.context.device.label + 'is offline');
+        this.log.error(this.accessory.context.device.label + ' is offline');
         return reject(new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE));
       }
       this.refreshStatus().then((success) => {
@@ -214,7 +214,12 @@ export class LightbulbPlatformAccessory extends BasePlatformAccessory {
       const stValue = Math.max(2200, Math.min(9000, Math.round(1000000 / (value as number))));
       this.log.debug(`Sending converted temperature value of ${stValue} to ${this.name}`);
       this.sendCommand('colorTemperature', 'setColorTemperature', [stValue])
-        .then(() => resolve())
+        .then(() => {
+          const calc = this.api.hap.ColorUtils.colorTemperatureToHueAndSaturation( value as number );
+          this.service.getCharacteristic( this.platform.Characteristic.Saturation ).updateValue( calc.saturation );
+          this.service.getCharacteristic( this.platform.Characteristic.Hue ).updateValue( calc.hue );
+          resolve();
+        })
         .catch((value) => reject(value));
     });
   }
